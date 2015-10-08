@@ -80,10 +80,10 @@ impl Context {
     /// Suspend the current execution context and resume another by
     /// saving the registers values of the executing thread to a Context
     /// then loading the registers from a previously saved Context.
-    pub fn swap(out_context: &mut Context, in_context: &Context) {
+    pub fn swap(out_context: &Context, in_context: &Context) {
         debug!("swapping contexts");
-        let out_regs: &mut Registers = match out_context {
-            &mut Context { regs: ref mut r, .. } => r
+        let out_regs: &Registers = match out_context {
+            &Context { regs: ref r, .. } => r
         };
         let in_regs: &Registers = match in_context {
             &Context { regs: ref r, .. } => r
@@ -148,7 +148,7 @@ impl Context {
 }
 
 extern {
-    fn rust_swap_registers(out_regs: *mut Registers, in_regs: *const Registers);
+    fn rust_swap_registers(out_regs: *const Registers, in_regs: *const Registers);
     fn rust_save_registers(out_regs: *mut Registers);
     fn rust_load_registers(in_regs: *const Registers) -> !;
 }
