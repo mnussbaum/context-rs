@@ -1,7 +1,6 @@
 #![feature(fnbox)]
 
 extern crate context;
-extern crate libc;
 
 use std::mem;
 use std::boxed::FnBox;
@@ -10,7 +9,7 @@ use context::{Context, Stack};
 
 const STACK_SIZE: usize = 2 * 1024 * 1024; // 2MB
 
-extern "C" fn init_fn(arg: usize, f: *mut libc::c_void) -> ! {
+extern "C" fn init_fn(arg: usize, f: usize) -> ! {
     // Transmute it back to the Box<Box<FnBox()>>
     {
         let func: Box<Box<FnBox()>> = unsafe {
@@ -43,7 +42,7 @@ fn main() {
 
     let mut stk = Stack::new(STACK_SIZE);
     let ctx = Context::new(init_fn, unsafe { mem::transmute(&cur) },
-                           Box::into_raw(Box::new(callback)) as *mut libc::c_void, &mut stk);
+                           Box::into_raw(Box::new(callback)) as usize, &mut stk);
 
     println!("Before switch");
 

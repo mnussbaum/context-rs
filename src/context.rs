@@ -28,7 +28,7 @@ pub struct Context {
     stack_bounds: Option<(usize, usize)>,
 }
 
-pub type InitFn = extern "C" fn(usize, *mut libc::c_void) -> !; // first argument is task handle, second is thunk ptr
+pub type InitFn = extern "C" fn(usize, usize) -> !;
 
 impl Context {
     pub fn empty() -> Context {
@@ -47,19 +47,19 @@ impl Context {
     /// FIXME: this is basically an awful the interface. The main reason for
     ///        this is to reduce the number of allocations made when a green
     ///        task is spawned as much as possible
-    pub fn new(init: InitFn, arg: usize, start: *mut libc::c_void, stack: &mut Stack) -> Context {
+    pub fn new(init: InitFn, arg0: usize, arg1: usize, stack: &mut Stack) -> Context {
         let mut ctx = Context::empty();
-        ctx.init_with(init, arg, start, stack);
+        ctx.init_with(init, arg0, arg1, stack);
         ctx
     }
 
-    pub fn init_with(&mut self, init: InitFn, arg: usize, start: *mut libc::c_void, stack: &mut Stack) {
+    pub fn init_with(&mut self, init: InitFn, arg0: usize, arg1: usize, stack: &mut Stack) {
         let sp: *const usize = stack.end();
         let sp: *mut usize = sp as *mut usize;
         // Save and then immediately load the current context,
         // which we will then modify to call the given function when restored
 
-        initialize_call_frame(&mut self.regs, init, arg, start, sp);
+        initialize_call_frame(&mut self.regs, init, arg0, arg1, sp);
 
         // Scheduler tasks don't have a stack in the "we allocated it" sense,
         // but rather they run on pthreads stacks. We have complete control over
@@ -199,7 +199,7 @@ impl Registers {
 }
 
 #[cfg(target_arch = "x86")]
-fn initialize_call_frame(regs: &mut Registers, fptr: InitFn, arg: usize, thunkptr: *mut libc::c_void, sp: *mut usize) {
+fn initialize_call_frame(regs: &mut Registers, fptr: InitFn, arg0: usize, arg1: usize, sp: *mut usize) {
     // x86 has interesting stack alignment requirements, so do some alignment
     // plus some offsetting to figure out what the actual stack should be.
     let sp = align_down(sp);
@@ -214,8 +214,8 @@ fn initialize_call_frame(regs: &mut Registers, fptr: InitFn, arg: usize, thunkpt
     |              0 | retaddr(0) no return |               | <- sp |
     |----------------+----------------------+---------------+-------|
 */
-    unsafe { *mut_offset(sp, 2) = thunkptr as usize };
-    unsafe { *mut_offset(sp, 1) = arg as usize };
+    unsafe { *mut_offset(sp, 2) = arg1 as usize };
+    unsafe { *mut_offset(sp, 1) = arg0 as usize };
     unsafe { *mut_offset(sp, 0) = 0 }; // The final return address, 0 because of !
 
     regs.esp = sp as u32;
@@ -264,7 +264,7 @@ impl Registers {
 }
 
 #[cfg(target_arch = "x86_64")]
-fn initialize_call_frame(regs: &mut Registers, fptr: InitFn, arg: usize, thunkptr: *mut libc::c_void, sp: *mut usize) {
+fn initialize_call_frame(regs: &mut Registers, fptr: InitFn, arg0: usize, arg1: usize, sp: *mut usize) {
     extern { fn rust_bootstrap_green_task(); } // use an indirection because the call contract differences between windows and linux
     // TODO: use rust's condition compile attribute instead
 
@@ -285,13 +285,14 @@ fn initialize_call_frame(regs: &mut Registers, fptr: InitFn, arg: usize, thunkpt
 
     debug!("creating call framenn");
     debug!("fptr {:#x}", fptr as libc::uintptr_t);
-    debug!("arg {:#x}", arg);
+    debug!("arg0 {:#x}", arg0);
+    debug!("arg1 {:#x}", arg1);
     debug!("sp {:?}", sp);
 
     // These registers are frobbed by rust_bootstrap_green_task into the right
     // location so we can invoke the "real init function", `fptr`.
-    regs.gpr[RUSTRT_R12] = arg as libc::uintptr_t;
-    regs.gpr[RUSTRT_R13] = thunkptr as libc::uintptr_t;
+    regs.gpr[RUSTRT_R12] = arg0 as libc::uintptr_t;
+    regs.gpr[RUSTRT_R13] = arg1 as libc::uintptr_t;
     regs.gpr[RUSTRT_R14] = fptr as libc::uintptr_t;
 
     // These registers are picked up by the regular context switch paths. These
@@ -318,7 +319,7 @@ impl Registers {
 }
 
 #[cfg(target_arch = "arm")]
-fn initialize_call_frame(regs: &mut Registers, fptr: InitFn, arg: usize, thunkptr: *mut libc::c_void, sp: *mut usize) {
+fn initialize_call_frame(regs: &mut Registers, fptr: InitFn, arg0: usize, arg1: usize, sp: *mut usize) {
     extern { fn rust_bootstrap_green_task(); } // same as the x64 arch
 
     let sp = align_down(sp);
@@ -333,8 +334,8 @@ fn initialize_call_frame(regs: &mut Registers, fptr: InitFn, arg: usize, thunkpt
     // ARM uses the same technique as x86_64 to have a landing pad for the start
     // of all new green tasks. Neither r1/r2 are saved on a context switch, so
     // the shim will copy r3/r4 into r1/r2 and then execute the function in r5
-    regs[0] = arg as libc::uintptr_t;              // r0
-    regs[3] = thunkptr as libc::uintptr_t;         // r3
+    regs[0] = arg0 as libc::uintptr_t;              // r0
+    regs[3] = arg1 as libc::uintptr_t;         // r3
     regs[5] = fptr as libc::uintptr_t;             // r5
     regs[13] = sp as libc::uintptr_t;                          // #52 sp, r13
     regs[14] = rust_bootstrap_green_task as libc::uintptr_t;   // #56 pc, r14 --> lr
@@ -356,7 +357,7 @@ impl Registers {
 
 #[cfg(any(target_arch = "mips",
           target_arch = "mipsel"))]
-fn initialize_call_frame(regs: &mut Registers, fptr: InitFn, arg: usize, thunkptr: *mut libc::c_void, sp: *mut usize) {
+fn initialize_call_frame(regs: &mut Registers, fptr: InitFn, arg0: usize, arg1: usize, sp: *mut usize) {
     let sp = align_down(sp);
     // sp of mips o32 is 8-byte aligned
     let sp = mut_offset(sp, -2);
@@ -366,8 +367,8 @@ fn initialize_call_frame(regs: &mut Registers, fptr: InitFn, arg: usize, thunkpt
 
     let &mut Registers(ref mut regs) = regs;
 
-    regs[4] = arg as libc::uintptr_t;
-    regs[5] = thunkptr as libc::uintptr_t;
+    regs[4] = arg0 as libc::uintptr_t;
+    regs[5] = arg1 as libc::uintptr_t;
     regs[29] = sp as libc::uintptr_t;
     regs[25] = fptr as libc::uintptr_t;
     regs[31] = fptr as libc::uintptr_t;
@@ -388,7 +389,6 @@ fn mut_offset<T>(ptr: *mut T, count: isize) -> *mut T {
 
 #[cfg(test)]
 mod test {
-    use libc;
 
     use std::mem::transmute;
 
@@ -397,7 +397,7 @@ mod test {
 
     const MIN_STACK: usize = 2 * 1024 * 1024;
 
-    extern "C" fn init_fn(arg: usize, f: *mut libc::c_void) -> ! {
+    extern "C" fn init_fn(arg: usize, f: usize) -> ! {
         let func: fn() = unsafe {
             transmute(f)
         };

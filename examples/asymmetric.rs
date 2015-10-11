@@ -22,7 +22,6 @@
 
 #![feature(catch_panic, fnbox)]
 extern crate context;
-extern crate libc;
 
 use std::iter::Iterator;
 use std::mem::transmute;
@@ -64,7 +63,7 @@ thread_local!(static STACK_POOL: UnsafeCell<StackPool> = UnsafeCell::new(StackPo
 struct ForceUnwind;
 
 /// Initialization function for make context
-extern "C" fn coroutine_initialize(_: usize, f: *mut libc::c_void) -> ! {
+extern "C" fn coroutine_initialize(_: usize, f: usize) -> ! {
     {
         let func: Box<Box<FnBox()>> = unsafe {
             Box::from_raw(f as *mut Box<FnBox()>)
@@ -284,7 +283,7 @@ impl<T> Coroutine<T>
 
         let callback: Box<FnBox()> = Box::new(wrapper);
 
-        coro.context.init_with(coroutine_initialize, 0, Box::into_raw(Box::new(callback)) as *mut libc::c_void, &mut stack);
+        coro.context.init_with(coroutine_initialize, 0, Box::into_raw(Box::new(callback)) as usize, &mut stack);
         coro.stack = Some(stack);
 
         Coroutine {
