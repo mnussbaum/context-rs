@@ -38,11 +38,10 @@ impl Context {
         }
     }
 
-    /// Create a new context that will resume execution by running start
+    /// Create a new context
     ///
-    /// The `init` function will be run with `arg` and the `start` procedure
-    /// split up into code and env pointers. It is required that the `init`
-    /// function never return.
+    /// The `init` function will be run with `arg0` and `arg1`. It is required
+    /// that the `init` function never return.
     ///
     /// FIXME: this is basically an awful the interface. The main reason for
     ///        this is to reduce the number of allocations made when a green
@@ -51,6 +50,18 @@ impl Context {
         let mut ctx = Context::empty();
         ctx.init_with(init, arg0, arg1, stack);
         ctx
+    }
+
+    pub fn set_arg0(&mut self, new_arg0: usize, stack: &mut Stack) {
+        let sp: *const usize = stack.end();
+        let sp: *mut usize = sp as *mut usize;
+        set_call_frame_arg0(&mut self.regs, new_arg0, sp);
+    }
+
+    pub fn set_arg1(&mut self, new_arg1: usize, stack: &mut Stack) {
+        let sp: *const usize = stack.end();
+        let sp: *mut usize = sp as *mut usize;
+        set_call_frame_arg1(&mut self.regs, new_arg1, sp);
     }
 
     pub fn init_with(&mut self, init: InitFn, arg0: usize, arg1: usize, stack: &mut Stack) {
@@ -225,6 +236,20 @@ fn initialize_call_frame(regs: &mut Registers, fptr: InitFn, arg0: usize, arg1: 
     regs.ebp = 0;
 }
 
+#[cfg(target_arch = "x86")]
+fn set_call_frame_arg0(regs: &mut Registers, new_arg0: usize, sp: *mut usize) {
+    let sp = align_down(sp);
+    let sp = mut_offset(sp, -4);
+    unsafe { *mut_offset(sp, 1) = new_arg0 as usize };
+}
+
+#[cfg(target_arch = "x86")]
+fn set_call_frame_arg1(regs: &mut Registers, new_arg1: usize, sp: *mut usize) {
+    let sp = align_down(sp);
+    let sp = mut_offset(sp, -4);
+    unsafe { *mut_offset(sp, 2) = new_arg1 as usize };
+}
+
 // windows requires saving more registers (both general and XMM), so the windows
 // register context must be larger.
 #[cfg(all(windows, target_arch = "x86_64"))]
@@ -306,6 +331,18 @@ fn initialize_call_frame(regs: &mut Registers, fptr: InitFn, arg0: usize, arg1: 
     regs.gpr[RUSTRT_RBP] = 0;
 }
 
+#[cfg(target_arch = "x86_64")]
+fn set_call_frame_arg0(regs: &mut Registers, new_arg0: usize, _: *mut usize) {
+    static RUSTRT_R12: usize = 4;
+    regs.gpr[RUSTRT_R12] = new_arg0 as libc::uintptr_t;
+}
+
+#[cfg(target_arch = "x86_64")]
+fn set_call_frame_arg1(regs: &mut Registers, new_arg1: usize, _: *mut usize) {
+    static RUSTRT_R13: usize = 5;
+    regs.gpr[RUSTRT_R13] = new_arg1 as libc::uintptr_t;
+}
+
 #[cfg(target_arch = "arm")]
 #[repr(C)]
 #[derive(Debug)]
@@ -341,6 +378,18 @@ fn initialize_call_frame(regs: &mut Registers, fptr: InitFn, arg0: usize, arg1: 
     regs[14] = rust_bootstrap_green_task as libc::uintptr_t;   // #56 pc, r14 --> lr
 }
 
+#[cfg(target_arch = "arm")]
+fn set_call_frame_arg0(regs: &mut Registers, new_arg0: usize, sp: *mut usize) {
+    let &mut Registers(ref mut regs) = regs;
+    regs[0] = new_arg0 as libc::uintptr_t;
+}
+
+#[cfg(target_arch = "arm")]
+fn set_call_frame_arg1(regs: &mut Registers, new_arg1: usize, sp: *mut usize) {
+    let &mut Registers(ref mut regs) = regs;
+    regs[3] = new_arg1 as libc::uintptr_t;
+}
+
 #[cfg(any(target_arch = "mips",
           target_arch = "mipsel"))]
 #[repr(C)]
@@ -374,6 +423,20 @@ fn initialize_call_frame(regs: &mut Registers, fptr: InitFn, arg0: usize, arg1: 
     regs[31] = fptr as libc::uintptr_t;
 }
 
+#[cfg(any(target_arch = "mips",
+          target_arch = "mipsel"))]
+fn set_call_frame_arg0(regs: &mut Registers, new_arg0: usize, sp: *mut usize) {
+    let &mut Registers(ref mut regs) = regs;
+    regs[0] = new_arg0 as libc::uintptr_t;
+}
+
+#[cfg(any(target_arch = "mips",
+          target_arch = "mipsel"))]
+fn set_call_frame_arg1(regs: &mut Registers, new_arg1: usize, sp: *mut usize) {
+    let &mut Registers(ref mut regs) = regs;
+    regs[5] = new_arg1 as libc::uintptr_t;
+}
+
 fn align_down(sp: *mut usize) -> *mut usize {
     let sp = (sp as usize) & !(16 - 1);
     sp as *mut usize
@@ -389,7 +452,6 @@ fn mut_offset<T>(ptr: *mut T, count: isize) -> *mut T {
 
 #[cfg(test)]
 mod test {
-
     use std::mem::transmute;
 
     use stack::Stack;
@@ -417,6 +479,32 @@ mod test {
 
         let mut stk = Stack::new(MIN_STACK);
         let ctx = Context::new(init_fn, unsafe { transmute(&cur) }, unsafe { transmute(callback) }, &mut stk);
+
+        Context::swap(&mut cur, &ctx);
+    }
+
+    #[test]
+    fn test_set_arg0() {
+        let mut cur = Context::empty();
+
+        fn callback() {}
+
+        let mut stk = Stack::new(MIN_STACK);
+        let mut ctx = Context::new(init_fn, 0 as usize, unsafe { transmute(callback) }, &mut stk);
+        ctx.set_arg0(unsafe { transmute(&cur) }, &mut stk);
+
+        Context::swap(&mut cur, &ctx);
+    }
+
+    #[test]
+    fn test_set_arg1() {
+        let mut cur = Context::empty();
+
+        fn callback() {}
+
+        let mut stk = Stack::new(MIN_STACK);
+        let mut ctx = Context::new(init_fn, unsafe { transmute(&cur) }, 0 as usize, &mut stk);
+        ctx.set_arg1(unsafe { transmute(callback) }, &mut stk);
 
         Context::swap(&mut cur, &ctx);
     }
