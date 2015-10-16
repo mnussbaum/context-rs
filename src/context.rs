@@ -11,19 +11,21 @@
 // FIXME: Silence the warning for `Registers`
 #![allow(improper_ctypes)]
 
-use stack::Stack;
-use std::usize;
-
 use libc;
-#[cfg(target_arch = "x86_64")]
-use simd;
-
+#[cfg(target_arch = "x86_64")] use simd;
+use std::usize;
 use sys;
+
+use error::ContextError;
+use stack::Stack;
+use Result;
+
 
 #[derive(Debug)]
 pub struct Context {
     /// Hold the registers while the task or scheduler is suspended
     regs: Registers,
+    stack: Option<Stack>,
     /// Lower bound and upper bound for the stack
     stack_bounds: Option<(usize, usize)>,
 }
@@ -34,6 +36,7 @@ impl Context {
     pub fn empty() -> Context {
         Context {
             regs: Registers::new(),
+            stack: None,
             stack_bounds: None,
         }
     }
@@ -46,25 +49,13 @@ impl Context {
     /// FIXME: this is basically an awful the interface. The main reason for
     ///        this is to reduce the number of allocations made when a green
     ///        task is spawned as much as possible
-    pub fn new(init: InitFn, arg0: usize, arg1: usize, stack: &mut Stack) -> Context {
+    pub fn new(init: InitFn, arg0: usize, arg1: usize, stack: Stack) -> Context {
         let mut ctx = Context::empty();
         ctx.init_with(init, arg0, arg1, stack);
         ctx
     }
 
-    pub fn set_arg0(&mut self, new_arg0: usize, stack: &mut Stack) {
-        let sp: *const usize = stack.end();
-        let sp: *mut usize = sp as *mut usize;
-        set_call_frame_arg0(&mut self.regs, new_arg0, sp);
-    }
-
-    pub fn set_arg1(&mut self, new_arg1: usize, stack: &mut Stack) {
-        let sp: *const usize = stack.end();
-        let sp: *mut usize = sp as *mut usize;
-        set_call_frame_arg1(&mut self.regs, new_arg1, sp);
-    }
-
-    pub fn init_with(&mut self, init: InitFn, arg0: usize, arg1: usize, stack: &mut Stack) {
+    pub fn init_with(&mut self, init: InitFn, arg0: usize, arg1: usize, stack: Stack) {
         let sp: *const usize = stack.end();
         let sp: *mut usize = sp as *mut usize;
         // Save and then immediately load the current context,
@@ -84,6 +75,26 @@ impl Context {
             } else {
                 Some((stack_base as usize, sp as usize))
             };
+        self.stack = Some(stack);
+    }
+
+    /// Sets the values for the arguments passed to the context's InitFn.
+    /// arg_index can only be values 0 or 1.
+    pub fn set_arg(&mut self, new_arg: usize, arg_index: usize) -> Result<()> {
+        match self.stack {
+            None => Err(ContextError::EmptyStack),
+            Some(ref mut stack) => {
+                let sp: *const usize = stack.end();
+                let sp: *mut usize = sp as *mut usize;
+                match arg_index {
+                    0 => set_call_frame_arg0(&mut self.regs, new_arg, sp),
+                    1 => set_call_frame_arg1(&mut self.regs, new_arg, sp),
+                    _ => return Err(ContextError::InvalidSetArgIndex),
+                }
+
+                Ok(())
+            },
+        }
     }
 
     /// Switch contexts
@@ -154,6 +165,13 @@ impl Context {
             }
 
             rust_load_registers(regs);
+        }
+    }
+
+    pub fn take_stack(&mut self) -> Result<Stack> {
+        match self.stack.take() {
+            Some(stack) => Ok(stack),
+            None => Err(ContextError::EmptyStack),
         }
     }
 }
@@ -454,8 +472,9 @@ fn mut_offset<T>(ptr: *mut T, count: isize) -> *mut T {
 mod test {
     use std::mem::transmute;
 
-    use stack::Stack;
+    use error::ContextError;
     use context::Context;
+    use stack::Stack;
 
     const MIN_STACK: usize = 2 * 1024 * 1024;
 
@@ -477,10 +496,29 @@ mod test {
 
         fn callback() {}
 
-        let mut stk = Stack::new(MIN_STACK);
-        let ctx = Context::new(init_fn, unsafe { transmute(&cur) }, unsafe { transmute(callback) }, &mut stk);
+        let stk = Stack::new(MIN_STACK);
+        let ctx = Context::new(init_fn, unsafe { transmute(&cur) }, unsafe { transmute(callback) }, stk);
 
         Context::swap(&mut cur, &ctx);
+    }
+
+    #[test]
+    fn test_take_stack() {
+        let stk = Stack::new(MIN_STACK);
+        let mut ctx = Context::new(init_fn, 0, 0, stk);
+
+        let _: Stack = ctx.take_stack().unwrap();
+
+        match ctx.take_stack() {
+            Ok(_) => panic!("Should have had error taking non-existent stack"),
+            Err(err) => assert_eq!(err, ContextError::EmptyStack),
+        }
+
+        let mut empty_context = Context::empty();
+        match empty_context.take_stack() {
+            Ok(_) => panic!("Should have had error taking non-existent stack"),
+            Err(err) => assert_eq!(err, ContextError::EmptyStack),
+        }
     }
 
     #[test]
@@ -489,9 +527,9 @@ mod test {
 
         fn callback() {}
 
-        let mut stk = Stack::new(MIN_STACK);
-        let mut ctx = Context::new(init_fn, 0 as usize, unsafe { transmute(callback) }, &mut stk);
-        ctx.set_arg0(unsafe { transmute(&cur) }, &mut stk);
+        let stk = Stack::new(MIN_STACK);
+        let mut ctx = Context::new(init_fn, 0, unsafe { transmute(callback) }, stk);
+        assert!(ctx.set_arg(unsafe { transmute(&cur) }, 0).is_ok());
 
         Context::swap(&mut cur, &ctx);
     }
@@ -502,11 +540,30 @@ mod test {
 
         fn callback() {}
 
-        let mut stk = Stack::new(MIN_STACK);
-        let mut ctx = Context::new(init_fn, unsafe { transmute(&cur) }, 0 as usize, &mut stk);
-        ctx.set_arg1(unsafe { transmute(callback) }, &mut stk);
+        let stk = Stack::new(MIN_STACK);
+        let mut ctx = Context::new(init_fn, unsafe { transmute(&cur) }, 0, stk);
+        assert!(ctx.set_arg(unsafe { transmute(callback) }, 1).is_ok());
 
         Context::swap(&mut cur, &ctx);
+    }
+
+    #[test]
+    fn test_set_arg_invalid_index() {
+        let stk = Stack::new(MIN_STACK);
+        let mut ctx = Context::new(init_fn, 0, 0, stk);
+        match ctx.set_arg(0, 2) {
+            Ok(_) => panic!("Should have had error setting arg 2"),
+            Err(err) => assert_eq!(err, ContextError::InvalidSetArgIndex),
+        }
+    }
+
+    #[test]
+    fn test_set_arg_empty_stack() {
+        let mut ctx = Context::empty();
+        match ctx.set_arg(0, 0) {
+            Ok(_) => panic!("Should have had error setting arg without a stack"),
+            Err(err) => assert_eq!(err, ContextError::EmptyStack),
+        }
     }
 
     #[test]
@@ -515,8 +572,8 @@ mod test {
 
         fn callback() {}
 
-        let mut stk = Stack::new(MIN_STACK);
-        let ctx = Context::new(init_fn, unsafe { transmute(&cur) }, unsafe { transmute(callback) }, &mut stk);
+        let stk = Stack::new(MIN_STACK);
+        let ctx = Context::new(init_fn, unsafe { transmute(&cur) }, unsafe { transmute(callback) }, stk);
 
         let mut _no_use = Box::new(true);
 
